@@ -1,0 +1,10 @@
+streamlit>=1.32.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+matplotlib>=3.7.0
+wordcloud>=1.9.0
+vaderSentiment>=3.3.2
+textblob>=0.17.1
+praw>=7.7.1
+snscrape>=0.7.0.20230622
