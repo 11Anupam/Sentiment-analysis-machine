@@ -7,9 +7,13 @@ Falls back to synthetic demo data if credentials not set
 import praw
 import pandas as pd
 import datetime
+import json
 import random
 import time
 import os
+from typing import Optional, Tuple
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 # ── Reddit scraper ──────────────────────────────────────────────────────────
 
@@ -78,10 +82,176 @@ def scrape_reddit(brand: str, limit: int = 100, time_filter: str = "month") -> p
 
 # ── Twitter / X scraper ─────────────────────────────────────────────────────
 
+CSV_COLUMN_ALIASES = {
+    "text": ("text", "content", "tweet", "rawContent", "raw_content", "full_text"),
+    "date": ("date", "created_at", "createdAt", "timestamp", "time"),
+    "url": ("url", "tweet_url", "link", "permalink"),
+    "score": ("score", "likeCount", "like_count", "likes", "favorite_count"),
+    "brand": ("brand", "query", "keyword", "topic"),
+}
+
+XQUIK_DEFAULT_API_BASE_URL = "https://xquik.com/api/v1"
+XQUIK_REQUEST_TIMEOUT_SECONDS = 30
+
+
+def _pick_column(df: pd.DataFrame, aliases: Tuple[str, ...]) -> Optional[str]:
+    for name in aliases:
+        if name in df.columns:
+            return name
+    lower_map = {str(col).lower(): col for col in df.columns}
+    for name in aliases:
+        found = lower_map.get(name.lower())
+        if found is not None:
+            return found
+    return None
+
+
+def search_xquik_mentions(
+    brand: str,
+    limit: int = 100,
+    days_back: int = 30,
+) -> Optional[pd.DataFrame]:
+    """Fetch recent X mentions through the optional Xquik REST integration."""
+    api_key = os.getenv("XQUIK_API_KEY", "").strip()
+    if not api_key or limit <= 0:
+        return None
+
+    base_url = os.getenv(
+        "XQUIK_API_BASE_URL",
+        XQUIK_DEFAULT_API_BASE_URL,
+    ).strip().rstrip("/")
+    if not base_url:
+        base_url = XQUIK_DEFAULT_API_BASE_URL
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=max(days_back, 0))
+    since_time = cutoff.isoformat().replace("+00:00", "Z")
+    query = urlencode({
+        "q": brand,
+        "queryType": "Latest",
+        "limit": min(limit, 200),
+        "sinceTime": since_time,
+    })
+    request = Request(
+        f"{base_url}/x/tweets/search?{query}",
+        headers={"Accept": "application/json", "x-api-key": api_key},
+    )
+
+    try:
+        with urlopen(request, timeout=XQUIK_REQUEST_TIMEOUT_SECONDS) as response:
+            payload = json.load(response)
+    except Exception as error:
+        print(f"[scraper] Xquik API error: {error} - falling back to the next source")
+        return None
+
+    tweets = payload.get("tweets") if isinstance(payload, dict) else None
+    if not isinstance(tweets, list):
+        return None
+
+    records = []
+    for tweet in tweets[:limit]:
+        if not isinstance(tweet, dict):
+            continue
+        text = tweet.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        tweet_id = tweet.get("id")
+        url = tweet.get("url")
+        if not isinstance(url, str) and tweet_id is not None:
+            url = f"https://x.com/i/status/{tweet_id}"
+        records.append({
+            "date": tweet.get("createdAt") or tweet.get("created_at"),
+            "text": text,
+            "source": "xquik_api",
+            "brand": brand,
+            "url": url if isinstance(url, str) else "",
+            "score": tweet.get("likeCount", tweet.get("like_count", 0)) or 0,
+        })
+
+    if not records:
+        return None
+
+    frame = pd.DataFrame(records)
+    parsed_dates = pd.to_datetime(frame["date"], errors="coerce", utc=True)
+    recent = parsed_dates.notna() & (parsed_dates >= pd.Timestamp(cutoff))
+    frame = frame.loc[recent].copy()
+    if frame.empty:
+        return None
+    frame["date"] = parsed_dates.loc[recent].dt.tz_convert(None)
+    return frame
+
+
+def load_xquik_csv_mentions(
+    brand: str,
+    limit: int = 100,
+    days_back: int = 30,
+) -> Optional[pd.DataFrame]:
+    """Load reviewed X/Twitter mentions from an optional CSV override."""
+    csv_path = os.getenv("XQUIK_TWEETS_CSV", "").strip()
+    if not csv_path:
+        return None
+
+    try:
+        raw = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"[scraper] Xquik CSV error: {e} - falling back to live Twitter/X collection")
+        return None
+
+    text_col = _pick_column(raw, CSV_COLUMN_ALIASES["text"])
+    if text_col is None:
+        print("[scraper] Xquik CSV missing a text/content column - falling back to live Twitter/X collection")
+        return None
+
+    date_col = _pick_column(raw, CSV_COLUMN_ALIASES["date"])
+    url_col = _pick_column(raw, CSV_COLUMN_ALIASES["url"])
+    score_col = _pick_column(raw, CSV_COLUMN_ALIASES["score"])
+    brand_col = _pick_column(raw, CSV_COLUMN_ALIASES["brand"])
+
+    df = raw.copy()
+    if brand_col is not None:
+        brand_filter = df[brand_col].astype(str).str.casefold() == brand.casefold()
+    else:
+        brand_filter = df[text_col].astype(str).str.contains(brand, case=False, na=False, regex=False)
+    df = df.loc[brand_filter].head(limit)
+
+    if df.empty:
+        return None
+
+    if date_col is not None:
+        dates = pd.to_datetime(df[date_col], errors="coerce", utc=True).dt.tz_convert(None)
+    else:
+        dates = pd.Series([datetime.datetime.now()] * len(df), index=df.index)
+
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=days_back)
+    date_filter = dates.isna() | (dates >= cutoff)
+    df = df.loc[date_filter]
+    dates = dates.loc[date_filter].fillna(pd.Timestamp.now())
+
+    if df.empty:
+        return None
+
+    return pd.DataFrame({
+        "date": dates,
+        "text": df[text_col].astype(str),
+        "source": "xquik_csv",
+        "brand": brand,
+        "url": df[url_col].astype(str) if url_col is not None else "",
+        "score": pd.to_numeric(df[score_col], errors="coerce").fillna(0) if score_col is not None else 0,
+    }).head(limit)
+
+
 def scrape_twitter(brand: str, limit: int = 100, days_back: int = 30) -> pd.DataFrame:
     """
     Scrape Twitter/X mentions using snscrape (no API key required).
     """
+    csv_mentions = load_xquik_csv_mentions(brand, limit=limit, days_back=days_back)
+    if csv_mentions is not None:
+        return csv_mentions
+
+    api_mentions = search_xquik_mentions(brand, limit=limit, days_back=days_back)
+    if api_mentions is not None:
+        return api_mentions
+
     try:
         import snscrape.modules.twitter as sntwitter
 
