@@ -4,16 +4,17 @@ Uses PRAW for Reddit (free API) and snscrape for Twitter (no auth needed)
 Falls back to synthetic demo data if credentials not set
 """
 
-import praw
-import pandas as pd
 import datetime
 import json
+import os
 import random
 import time
-import os
 from typing import Optional, Tuple
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+import pandas as pd
+import praw
 
 # ── Reddit scraper ──────────────────────────────────────────────────────────
 
@@ -90,8 +91,19 @@ CSV_COLUMN_ALIASES = {
     "brand": ("brand", "query", "keyword", "topic"),
 }
 
-XQUIK_DEFAULT_API_BASE_URL = "https://xquik.com/api/v1"
-XQUIK_REQUEST_TIMEOUT_SECONDS = 30
+XQUIK_API_BASE_URL = "https://xquik.com/api/v1"
+XQUIK_API_CONTRACT = "2026-04-29"
+XQUIK_REQUEST_TIMEOUT_SECONDS = 70
+
+
+class RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def urlopen(request, timeout):
+    opener = build_opener(RejectRedirects())
+    return opener.open(request, timeout=timeout)
 
 
 def _pick_column(df: pd.DataFrame, aliases: Tuple[str, ...]) -> Optional[str]:
@@ -116,13 +128,6 @@ def search_xquik_mentions(
     if not api_key or limit <= 0:
         return None
 
-    base_url = os.getenv(
-        "XQUIK_API_BASE_URL",
-        XQUIK_DEFAULT_API_BASE_URL,
-    ).strip().rstrip("/")
-    if not base_url:
-        base_url = XQUIK_DEFAULT_API_BASE_URL
-
     now = datetime.datetime.now(datetime.timezone.utc)
     cutoff = now - datetime.timedelta(days=max(days_back, 0))
     since_time = cutoff.isoformat().replace("+00:00", "Z")
@@ -133,15 +138,21 @@ def search_xquik_mentions(
         "sinceTime": since_time,
     })
     request = Request(
-        f"{base_url}/x/tweets/search?{query}",
-        headers={"Accept": "application/json", "x-api-key": api_key},
+        f"{XQUIK_API_BASE_URL}/x/tweets/search?{query}",
+        headers={
+            "Accept": "application/json",
+            "x-api-key": api_key,
+            "xquik-api-contract": XQUIK_API_CONTRACT,
+        },
     )
 
     try:
         with urlopen(request, timeout=XQUIK_REQUEST_TIMEOUT_SECONDS) as response:
             payload = json.load(response)
-    except Exception as error:
-        print(f"[scraper] Xquik API error: {error} - falling back to the next source")
+    except (OSError, ValueError) as error:
+        print(
+            f"[scraper] Xquik API error: {error} - falling back to the next source"
+        )
         return None
 
     tweets = payload.get("tweets") if isinstance(payload, dict) else None
@@ -160,7 +171,11 @@ def search_xquik_mentions(
         if not isinstance(url, str) and tweet_id is not None:
             url = f"https://x.com/i/status/{tweet_id}"
         records.append({
-            "date": tweet.get("createdAt") or tweet.get("created_at"),
+            "date": _parse_xquik_timestamp(
+                tweet.get("created")
+                or tweet.get("createdAt")
+                or tweet.get("created_at")
+            ),
             "text": text,
             "source": "xquik_api",
             "brand": brand,
@@ -179,6 +194,12 @@ def search_xquik_mentions(
         return None
     frame["date"] = parsed_dates.loc[recent].dt.tz_convert(None)
     return frame
+
+
+def _parse_xquik_timestamp(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return pd.to_datetime(value, unit="s", errors="coerce", utc=True)
+    return pd.to_datetime(value, errors="coerce", utc=True)
 
 
 def load_xquik_csv_mentions(

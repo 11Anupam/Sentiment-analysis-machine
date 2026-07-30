@@ -73,12 +73,13 @@ Deploy in ~2 minutes
 REDDIT_CLIENT_ID=your_id
 REDDIT_CLIENT_SECRET=your_secret
 XQUIK_API_KEY=your_key
-XQUIK_API_BASE_URL=https://xquik.com/api/v1
 XQUIK_TWEETS_CSV=path/to/reviewed-tweets.csv
 
 `XQUIK_API_KEY` is optional. When set, the Twitter/X collector searches recent
 posts through the Xquik REST API before falling back to live collection or demo
-data. `XQUIK_API_BASE_URL` only needs to be set for compatible custom deployments.
+data. It sends credentials only to the canonical Xquik origin.
+See the [Xquik REST API overview](https://docs.xquik.com/api-reference/overview)
+for request and response details.
 
 `XQUIK_TWEETS_CSV` is an optional offline override for a reviewed CSV file. It is
 checked before the API. Supported columns include `text`, `content`, `tweet`,
