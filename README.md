@@ -50,8 +50,8 @@ brand_sentiment_app/
 
 ⚙️ Getting Started
 Run Locally
-git clone <repo-url>
-cd brand_sentiment_app
+git clone https://github.com/11Anupam/Sentiment-analysis-machine.git
+cd Sentiment-analysis-machine
 pip install -r requirements.txt
 streamlit run app.py
 
@@ -72,6 +72,22 @@ Deploy in ~2 minutes
 
 REDDIT_CLIENT_ID=your_id
 REDDIT_CLIENT_SECRET=your_secret
+XQUIK_API_KEY=your_key
+XQUIK_TWEETS_CSV=path/to/reviewed-tweets.csv
+
+`XQUIK_API_KEY` is optional. When set, the Twitter/X collector searches recent
+posts through the Xquik REST API before falling back to live collection or demo
+data. It sends credentials only to the canonical Xquik origin.
+See the [Xquik REST API overview](https://docs.xquik.com/api-reference/overview)
+for request and response details.
+
+`XQUIK_TWEETS_CSV` is an optional offline override for a reviewed CSV file. It is
+checked before the API. Supported columns include `text`, `content`, `tweet`,
+`rawContent`, `date`, `created_at`, `url`, `tweet_url`, `score`, `likes`,
+`brand`, `query`, and `keyword`.
+
+Xquik is an independent third-party service. Not affiliated with X Corp.
+"Twitter" and "X" are trademarks of X Corp.
 
 
 
